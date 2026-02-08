@@ -8,7 +8,8 @@ import {
     ExternalLink,
     Table as TableIcon,
     Printer,
-    FileDown
+    FileDown,
+    MoveHorizontal
 } from 'lucide-react';
 import initialRates from './data/rates.json';
 
@@ -201,6 +202,13 @@ const App = () => {
                         {activeRateType.fullLabel}でソート中
                     </div>
                 </div>
+
+                {/* Mobile Scroll Hint */}
+                <div className="md:hidden flex items-center justify-center gap-2 mb-4 py-3 px-4 bg-blue-500/10 border border-blue-500/20 rounded-2xl text-blue-300 text-[11px] font-bold tracking-widest no-print">
+                    <MoveHorizontal className="w-4 h-4 animate-bounce-horizontal" />
+                    <span>左右にスライドして詳細を確認できます</span>
+                </div>
+
                 <div className="overflow-x-auto print-overflow-visible">
                     <table className="w-full text-left border-collapse print-table">
                         <thead>
@@ -390,7 +398,7 @@ const App = () => {
                     tr { page-break-inside: avoid !important; }
                 }
             `}</style>
-        </div>
+        </div >
     );
 };
 
