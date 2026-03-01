@@ -98,13 +98,13 @@ const BANK_CONFIGS = [
     {
         // 組合員・生協会員の両方を同一ページから取得するため特殊処理
         name: ['中央労金（組合員）', '中央労金（生協会員）'],
-        url: 'https://chuo.rokin.com/banking/loan/housing/beginner/secured/',
+        url: 'https://chuo.rokin.com/banking/rate/secured/',  // 金利一覧項目別ページ
         strategy: async (page, url) => {
-            const text = await getPageText(page, url, 6000); // JS描画を十分待機
+            const text = await getPageText(page, url, 5000); // JS描画を十分待機
             // 「団体会員」セクション → 「生協会員」セクションの手前まで
-            const kumiai = extractSectionRate(text, '「団体会員」', '「生協会員」');
-            // 「生協会員」セクション
-            const seikyou = extractSectionRate(text, '「生協会員」');
+            const kumiai = extractSectionRate(text, '団体会員', '生協会員');
+            // 「生協会員」セクション → 「一般勤労者」セクションの手前まで
+            const seikyou = extractSectionRate(text, '生協会員', '一般勤労者');
             console.log(`  → 中央労金 組合員: ${kumiai}%  生協会員: ${seikyou}%`);
             return {
                 '中央労金（組合員）': kumiai ? { variable: kumiai } : null,
@@ -184,9 +184,9 @@ const BANK_CONFIGS = [
     },
     {
         name: '静岡銀行',
-        url: 'https://www.shizuokabank.co.jp/personal/loan/jyutaku/index.html',
+        url: 'https://www.shizuokabank.co.jp/interest/loan.html',  // 金利一覧ページに変更
         strategy: async (page, url) => {
-            const text = await getPageText(page, url, 2000);
+            const text = await getPageText(page, url, 3000);
             const rate = extractVariableRateContextual(text);
             console.log(`  → 静岡銀行 変動: ${rate}%`);
             return rate ? { variable: rate } : null;
@@ -204,12 +204,35 @@ const BANK_CONFIGS = [
     },
     {
         name: 'SBI新生銀行（SBIハイパー預金開設者割り）',
-        url: 'https://www.sbishinseibank.co.jp/retail/housing/interest/interest_rate_new/?intcid=housing_txt_21',
+        url: 'https://www.sbishinseibank.co.jp/retail/housing/interest/interest_rate_new/',
         strategy: async (page, url) => {
-            const text = await getPageText(page, url, 3000);
-            const rate = extractVariableRateContextual(text);
-            console.log(`  → SBI新生 変動: ${rate}%`);
-            return rate ? { variable: rate } : null;
+            try {
+                // HTTP/1.1強制でHTTP2プロトコルエラーを回避
+                const resp = await page.goto(url, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 30000,
+                });
+                if (!resp || resp.status() >= 400) throw new Error(`HTTP ${resp?.status()}`);
+                await page.waitForTimeout(3000);
+                const text = await page.evaluate(() => document.body.innerText);
+                // SBI新生は「SBIハイパー」近傈の最小値を採用
+                const lines = text.split(/\n/);
+                const contextLines = [];
+                for (let i = 0; i < lines.length; i++) {
+                    if (/ハイパー|変動/.test(lines[i])) {
+                        for (let j = Math.max(0, i - 1); j <= Math.min(lines.length - 1, i + 8); j++) {
+                            contextLines.push(lines[j]);
+                        }
+                    }
+                }
+                const candidates = extractRates(contextLines.join('\n'), 0.3, 1.5);
+                const rate = candidates.length > 0 ? Math.min(...candidates) : null;
+                console.log(`  → SBI新生 変動: ${rate}%`);
+                return rate ? { variable: rate } : null;
+            } catch (e) {
+                console.error(`  ❌ SBI新生 エラー: ${e.message}`);
+                return null;
+            }
         },
     },
     {
