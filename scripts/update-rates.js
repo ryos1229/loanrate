@@ -1,25 +1,15 @@
-/**
- * scripts/update-rates.js
- *
- * GitHub Actionsから毎月1日に実行される金利自動更新スクリプト
- * Playwright でスクレイピングし、Firebase Admin SDK で Firestore に書き込む
- *
- * 環境変数（GitHub Secrets）:
- *   FIREBASE_PROJECT_ID  - FirebaseプロジェクトID
- *   FIREBASE_CLIENT_EMAIL - サービスアカウントのメールアドレス
- *   FIREBASE_PRIVATE_KEY  - サービスアカウントの秘密鍵（改行を\nで）
- */
-
 import { chromium } from 'playwright';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import * as dotenv from 'dotenv';
+dotenv.config();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Firebase Admin 初期化（GitHub Actions環境）
+// Firebase Admin 初期化
 let firebaseInitialized = false;
 function initFirebase() {
     if (firebaseInitialized) return;
@@ -31,192 +21,109 @@ function initFirebase() {
         throw new Error('Firebase環境変数が設定されていません。GitHub Secretsを確認してください。');
     }
 
-    initializeApp({
-        credential: cert({ projectId, clientEmail, privateKey }),
-    });
+    initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
     firebaseInitialized = true;
 }
 
-// =====================================
-// 各銀行のスクレイピング戦略
-// =====================================
-const BANKS = [
-    {
-        name: '三菱UFJ銀行',
-        url: 'https://www.bk.mufg.jp/',
-        infoUrl: 'https://www.bk.mufg.jp/',
-        strategy: async (page) => {
-            // 三菱UFJは動的ページのため、スクレイピングが難しいため手動更新用の固定値を維持
-            // 実際の値は公式サイト（https://www.bk.mufg.jp/kariru/jyutaku/kinri/index.html）を確認
-            const currentData = JSON.parse(readFileSync(join(__dirname, '../src/data/rates.json'), 'utf8'));
-            const existing = currentData.find(b => b.name === '三菱UFJ銀行');
-            return existing ? {
-                variable: existing.variable,
-                baseRateVariable: existing.baseRateVariable,
-                fixed2: existing.fixed2,
-                fixed3: existing.fixed3,
-                fixed5: existing.fixed5,
-                fixed10: existing.fixed10,
-                allTerm: existing.allTerm,
-                url: existing.url,
-                remarks: existing.remarks,
-            } : null;
-        },
-    },
-    {
-        name: 'PayPay銀行',
-        url: 'https://www.paypay-bank.co.jp/service/loan/housing/',
-        infoUrl: 'https://www.paypay-bank.co.jp/service/loan/housing/',
-        strategy: async (page) => {
-            try {
-                await page.waitForSelector('body', { timeout: 15000 });
-                const content = await page.content();
-                // ページ内から変動金利を探す（数値パターン: 0.xx%）
-                const matches = content.match(/(\d+\.\d+)%/g);
-                if (matches && matches.length > 0) {
-                    // 0.3〜1.5の範囲内の数値を変動金利候補とする
-                    const candidates = matches
-                        .map(m => parseFloat(m))
-                        .filter(v => v >= 0.3 && v <= 1.5);
-                    if (candidates.length > 0) {
-                        const variable = Math.min(...candidates);
-                        console.log(`  → PayPay銀行 変動金利候補: ${candidates.join(', ')}% → ${variable}%を採用`);
-                        return { variable };
-                    }
-                }
-            } catch (e) {
-                console.warn(`  PayPay銀行 スクレイピング失敗: ${e.message}`);
+// 汎用スクレイピング戦略（ページ内の最も低い0.3%〜1.5%の％数値を変動金利として扱う）
+const genericVariableStrategy = async (page) => {
+    try {
+        await page.waitForTimeout(3000); // 動的描画を待機
+        const text = await page.evaluate(() => document.body.innerText);
+        const matches = text.match(/[\d０-９]+\.[\d０-９]+[％%]/g);
+        if (matches) {
+            const nums = matches.map(m => parseFloat(m.replace(/[％%]/, '').replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))));
+            const valid = nums.filter(n => n >= 0.3 && n <= 1.5);
+            if (valid.length > 0) {
+                return { variable: Math.min(...valid) };
             }
-            return null; // フォールバック: 既存データを維持
-        },
-    },
-    {
-        name: 'auじぶん銀行（融資率80%超）',
-        url: 'https://www.jibunbank.co.jp/lp/housing-loan/202502/',
-        infoUrl: 'https://www.jibunbank.co.jp/lp/housing-loan/',
-        strategy: async (page) => {
-            try {
-                await page.waitForSelector('body', { timeout: 15000 });
-                const content = await page.content();
-                const matches = content.match(/(\d+\.\d+)%/g);
-                if (matches) {
-                    const candidates = matches
-                        .map(m => parseFloat(m))
-                        .filter(v => v >= 0.3 && v <= 1.5);
-                    if (candidates.length > 0) {
-                        const variable = Math.min(...candidates);
-                        console.log(`  → auじぶん銀行 変動金利候補: ${candidates.join(', ')}% → ${variable}%を採用`);
-                        return { variable };
-                    }
-                }
-            } catch (e) {
-                console.warn(`  auじぶん銀行 スクレイピング失敗: ${e.message}`);
-            }
-            return null;
-        },
-    },
-    {
-        name: '住信SBIネット銀行',
-        url: 'https://www.netbk.co.jp/contents/lp/housing-loan/index.html',
-        infoUrl: 'https://www.netbk.co.jp/',
-        strategy: async (page) => {
-            try {
-                await page.waitForSelector('body', { timeout: 15000 });
-                const content = await page.content();
-                const matches = content.match(/(\d+\.\d+)%/g);
-                if (matches) {
-                    const candidates = matches
-                        .map(m => parseFloat(m))
-                        .filter(v => v >= 0.3 && v <= 1.5);
-                    if (candidates.length > 0) {
-                        const variable = Math.min(...candidates);
-                        console.log(`  → 住信SBI 変動金利候補: ${candidates.join(', ')}% → ${variable}%を採用`);
-                        return { variable };
-                    }
-                }
-            } catch (e) {
-                console.warn(`  住信SBIネット銀行 スクレイピング失敗: ${e.message}`);
-            }
-            return null;
-        },
-    },
-];
+        }
+    } catch (e) { console.warn(`解析エラー: ${e.message}`); }
+    return null;
+};
 
 // =====================================
-// メイン処理
+// 各銀行のURLとスクレイピング戦略
 // =====================================
+const BANK_URLS = {
+    'PayPay銀行': 'https://www.paypay-bank.co.jp/mortgage/interest/index.html',
+    '三井住友信託銀行': 'https://www.smtb.jp/personal/loan/house',
+    'りそな銀行': 'https://www.resonabank.co.jp/kojin/loan_viewer.html',
+    'SBI新生銀行（SBIハイパー預金開設者割り）': 'https://www.sbishinseibank.co.jp/retail/housing/interest/interest_rate_new/?intcid=housing_txt_21',
+    '三菱UFJ銀行': 'https://www.bk.mufg.jp/kariru/jutaku/yuuguu/index.html',
+    '住信SBIネット銀行': 'https://www.netbk.co.jp/contents/lineup/home-loan/web/kinri/',
+    'auじぶん銀行（融資率80%超）': 'https://www.jibunbank.co.jp/products/homeloan/interest/',
+    '横浜銀行': 'https://www.boy.co.jp/kojin/jutaku-loan/shinchiku/index.html',
+    'みずほ銀行': 'https://www.mizuhobank.co.jp/loan_housing/housingloancost/index.html',
+    'イオン銀行': 'https://www.aeonbank.co.jp/interest/loan/',
+    '中央労金（組合員）': 'https://chuo.rokin.com/banking/loan/housing/beginner/secured/',
+    '中央労金（生協会員）': 'https://chuo.rokin.com/banking/loan/housing/beginner/secured/',
+    '静岡銀行': 'https://www.shizuokabank.co.jp/personal/loan/jyutaku/index.html',
+    '三井住友銀行': 'https://www.smbc.co.jp/kojin/kinri/loan.html',
+    '中南信用金庫': 'https://www.shinkin.co.jp/chunan/_kinri/',
+    'JAさがみ（給振優遇金利）': 'https://ja-sagami.or.jp/service/loan/fee/',
+    '平塚信用金庫': 'https://www.shinkin.co.jp/hiratuka/individual/loan/housing/',
+    'ARUHIフラット35': 'https://www.sbiaruhi.co.jp/rate/'
+};
+
 async function updateRates() {
     console.log('🚀 金利自動更新を開始します...');
-    console.log(`📅 実行日時: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
 
     // 既存データを読み込む（フォールバック用）
-    const existingData = JSON.parse(
-        readFileSync(join(__dirname, '../src/data/rates.json'), 'utf8')
-    );
+    const existingData = JSON.parse(readFileSync(join(__dirname, '../src/data/rates.json'), 'utf8'));
+    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+    const context = await browser.newContext({ locale: 'ja-JP' });
 
-    const browser = await chromium.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
-    const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        locale: 'ja-JP',
-    });
-
-    const updatedData = [...existingData];
     let updatedCount = 0;
+    const finalData = [];
 
-    for (const bank of BANKS) {
-        console.log(`\n🔍 ${bank.name} をチェック中...`);
-        const page = await context.newPage();
-        try {
-            await page.goto(bank.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            const newRates = await bank.strategy(page);
+    // 既存データをベースに回す
+    for (const bank of existingData) {
+        let currentBankData = { ...bank };
+        const newUrl = BANK_URLS[bank.name];
 
-            if (newRates) {
-                const idx = updatedData.findIndex(d => d.name === bank.name);
-                if (idx !== -1) {
-                    const now = new Date().toISOString();
-                    updatedData[idx] = {
-                        ...updatedData[idx],
-                        ...newRates,
-                        lastUpdate: now,
-                    };
+        if (newUrl) {
+            currentBankData.url = newUrl; // URLを一斉更新
+            console.log(`\n🔍 ${bank.name} をチェック中... (${newUrl})`);
+            const page = await context.newPage();
+            try {
+                await page.goto(newUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                const newRates = await genericVariableStrategy(page);
+
+                if (newRates && newRates.variable) {
+                    currentBankData.variable = newRates.variable;
+                    currentBankData.lastUpdate = new Date().toISOString();
+                    console.log(`  ✅ 取得成功: 変動 ${newRates.variable}%`);
                     updatedCount++;
-                    console.log(`  ✅ ${bank.name} 更新完了`);
                 } else {
-                    console.log(`  ⚠️ ${bank.name} は既存データに見つかりませんでした。スキップします。`);
+                    console.log(`  ℹ️ 金利の自動抽出スキップ（既存データを維持）`);
                 }
-            } else {
-                console.log(`  ℹ️ ${bank.name} は既存データを維持します。`);
+            } catch (error) {
+                console.error(`  ❌ 取得失敗: ${error.message} (既存データを維持)`);
+            } finally {
+                await page.close();
             }
-        } catch (error) {
-            console.error(`  ❌ ${bank.name} の処理に失敗: ${error.message}`);
-        } finally {
-            await page.close();
+        } else {
+            console.log(`\n⏭️ ${bank.name} はURLマッピングがないため現状維持します。`);
         }
+        finalData.push(currentBankData);
     }
 
     await browser.close();
 
-    // Firestoreに書き込む
+    // Firestore書き込み
     console.log('\n📤 Firestoreへ書き込み中...');
     initFirebase();
     const db = getFirestore();
-    const docRef = db.collection('rates').doc('current');
-    await docRef.set({
-        banks: updatedData,
+    await db.collection('rates').doc('current').set({
+        banks: finalData,
         lastUpdated: new Date().toISOString(),
         source: 'github-actions',
         updatedBanks: updatedCount,
     });
 
-    console.log(`\n✅ 完了！${updatedCount}件の金利を更新し、Firestoreに保存しました。`);
-    console.log(`📊 合計 ${updatedData.length} 件のデータを管理中`);
+    console.log(`\n✅ 完了！Firestoreを更新しました。`);
     process.exit(0);
 }
 
-updateRates().catch((err) => {
-    console.error('\n💥 致命的なエラーが発生しました:', err);
-    process.exit(1);
-});
+updateRates().catch(console.error);

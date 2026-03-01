@@ -1,9 +1,9 @@
 name: 月次金利自動更新
 
 on:
-  # 毎月1日 午前9時（日本時間）に自動実行
+  # 毎月1日、2日、3日の午前9時（日本時間=UTC0時）に自動実行
   schedule:
-    - cron: '0 0 1 * *'  # UTC 0:00 = JST 9:00
+    - cron: '0 0 1,2,3 * *'  # UTC 0:00 = JST 9:00
 
   # 手動実行も可能（GitHubのActionsページから手動トリガー）
   workflow_dispatch:
