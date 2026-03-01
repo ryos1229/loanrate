@@ -1,0 +1,52 @@
+name: 月次金利自動更新
+
+on:
+  # 毎月1日 午前9時（日本時間）に自動実行
+  schedule:
+    - cron: '0 0 1 * *'  # UTC 0:00 = JST 9:00
+
+  # 手動実行も可能（GitHubのActionsページから手動トリガー）
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '手動実行の理由（任意）'
+        required: false
+        default: '手動テスト'
+
+jobs:
+  update-rates:
+    name: 金利データ取得・Firestore更新
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js 20 をセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 依存パッケージをインストール
+        run: npm ci
+
+      - name: firebase-admin をインストール
+        run: npm install firebase-admin
+
+      - name: Playwrightブラウザをインストール
+        run: npx playwright install chromium --with-deps
+
+      - name: 金利データを取得・Firestoreへ書き込み
+        env:
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
+          FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+        run: node scripts/update-rates.js
+
+      - name: 結果をサマリーに出力
+        if: always()
+        run: |
+          echo "## 🏦 金利更新結果" >> $GITHUB_STEP_SUMMARY
+          echo "- **実行日時**: $(TZ='Asia/Tokyo' date '+%Y年%m月%d日 %H:%M')" >> $GITHUB_STEP_SUMMARY
+          echo "- **トリガー**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY

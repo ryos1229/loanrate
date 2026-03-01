@@ -7,6 +7,9 @@ dist/
 # Env
 .env
 .env.local
+
+# Firebase サービスアカウントキー（絶対にGitにコミットしないこと！）
+serviceAccountKey.json
 .env.development.local
 .env.test.local
 .env.production.local

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
     TrendingDown,
     RefreshCw,
@@ -9,9 +9,13 @@ import {
     Table as TableIcon,
     Printer,
     FileDown,
-    MoveHorizontal
+    MoveHorizontal,
+    CheckCircle,
+    AlertCircle
 } from 'lucide-react';
-import initialRates from './data/rates.json';
+import { db } from './firebase.js';
+import { doc, getDoc } from 'firebase/firestore';
+import fallbackRates from './data/rates.json';
 
 const RATE_TYPES = [
     { id: 'variable', label: '変動', fullLabel: '変動金利', color: 'emerald', hex: '#10b981', hexDark: '#059669' },
@@ -23,10 +27,12 @@ const RATE_TYPES = [
 ];
 
 const App = () => {
-    const [rates, setRates] = useState(initialRates);
+    const [rates, setRates] = useState(fallbackRates);
     const [searchTerm, setSearchTerm] = useState('');
     const [sortBy, setSortBy] = useState('variable');
     const [isUpdating, setIsUpdating] = useState(false);
+    const [updateStatus, setUpdateStatus] = useState(null); // null | 'success' | 'error'
+    const [isFirebaseReady, setIsFirebaseReady] = useState(false);
 
     const filteredRates = useMemo(() => {
         return rates
@@ -53,14 +59,47 @@ const App = () => {
         });
     }, [rates]);
 
-    const handleUpdate = () => {
+    // Firestoreから金利データを取得する関数
+    const fetchRatesFromFirestore = useCallback(async () => {
         setIsUpdating(true);
-        // シミュレーションとしての遅延
-        setTimeout(() => {
-            setRates([...initialRates]); // 最新のJSONデータでステートを更新
+        setUpdateStatus(null);
+        try {
+            const docRef = doc(db, 'rates', 'current');
+            const docSnap = await getDoc(docRef);
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                if (data.banks && Array.isArray(data.banks)) {
+                    setRates(data.banks);
+                    setUpdateStatus('success');
+                    setIsFirebaseReady(true);
+                } else {
+                    throw new Error('データ形式が不正です');
+                }
+            } else {
+                // Firestoreにデータがまだない場合はフォールバック
+                console.warn('Firestoreにデータが見つかりません。ローカルデータを使用します。');
+                setRates(fallbackRates);
+                setUpdateStatus('error');
+            }
+        } catch (error) {
+            console.error('Firebase取得エラー:', error);
+            // エラー時はローカルJSONにフォールバック
+            setRates(fallbackRates);
+            setUpdateStatus('error');
+        } finally {
             setIsUpdating(false);
-            // ユーザーへのフィードバック（一時的なメッセージ等）はボタンのテキストで行う
-        }, 1000);
+            // 3秒後にステータスをリセット
+            setTimeout(() => setUpdateStatus(null), 3000);
+        }
+    }, []);
+
+    // アプリ起動時に自動でFirestoreから取得
+    useEffect(() => {
+        fetchRatesFromFirestore();
+    }, [fetchRatesFromFirestore]);
+
+    const handleUpdate = () => {
+        fetchRatesFromFirestore();
     };
 
     const StatCard = ({ title, value, unit, icon: Icon, color, subValue }) => (
@@ -100,10 +139,22 @@ const App = () => {
                     <button
                         onClick={handleUpdate}
                         disabled={isUpdating}
-                        className="no-print glass-hover glass px-5 py-2.5 rounded-xl flex items-center gap-2 text-white text-sm font-semibold disabled:opacity-50 shadow-xl shadow-blue-500/10 min-w-[140px] justify-center"
+                        className={`no-print glass-hover glass px-5 py-2.5 rounded-xl flex items-center gap-2 text-white text-sm font-semibold disabled:opacity-50 shadow-xl min-w-[160px] justify-center transition-all duration-300 ${updateStatus === 'success' ? 'border border-emerald-500/50 shadow-emerald-500/10' :
+                                updateStatus === 'error' ? 'border border-rose-500/50 shadow-rose-500/10' :
+                                    'shadow-blue-500/10'
+                            }`}
                     >
-                        <RefreshCw className={`w-4 h-4 ${isUpdating ? 'animate-spin' : ''}`} />
-                        {isUpdating ? '同期中...' : '最新情報を取得'}
+                        {updateStatus === 'success' ? (
+                            <CheckCircle className="w-4 h-4 text-emerald-400" />
+                        ) : updateStatus === 'error' ? (
+                            <AlertCircle className="w-4 h-4 text-rose-400" />
+                        ) : (
+                            <RefreshCw className={`w-4 h-4 ${isUpdating ? 'animate-spin' : ''}`} />
+                        )}
+                        {isUpdating ? '取得中...' :
+                            updateStatus === 'success' ? '更新完了！' :
+                                updateStatus === 'error' ? 'ローカルデータ使用中' :
+                                    '最新情報を取得'}
                     </button>
 
                     <button
@@ -114,9 +165,14 @@ const App = () => {
                         A4印刷 / PDF
                     </button>
 
-                    <div className="no-print flex items-center gap-2 text-[10px] text-slate-500 font-bold uppercase tracking-wider ml-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                        更新: {lastCheckTime}
+                    <div className="no-print flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider ml-2">
+                        <span className={`w-1.5 h-1.5 rounded-full ${isFirebaseReady ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'
+                            }`} />
+                        <span className={isFirebaseReady ? 'text-emerald-400/70' : 'text-amber-400/70'}>
+                            {isFirebaseReady ? 'Firebase同期済' : 'ローカルデータ'}
+                        </span>
+                        <span className="text-slate-600">|</span>
+                        <span className="text-slate-500">更新: {lastCheckTime}</span>
                     </div>
                 </div>
             </header>
